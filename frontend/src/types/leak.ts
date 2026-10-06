@@ -6,8 +6,17 @@ export interface Leak {
   deviceId: string
   /** 冗余站点 id */
   stationId: string
+  /** 关联点位与来源读数（手工单为空串），用于追溯派单依据 */
+  pointId: string
+  readingId: string
   /** 泄漏浓度（ppm） */
   concentrationPpm: number
+  /**
+   * 派单依据留档：派发当时的标准区间。
+   * 处置单展示与导出一律以留档为准，不随点位现标准变更。
+   */
+  standardMin: number
+  standardMax: number
   /** 发现时间 YYYY-MM-DD */
   foundTime: string
   measure: string

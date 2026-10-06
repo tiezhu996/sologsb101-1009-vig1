@@ -69,12 +69,12 @@ export default function AbnormalBoard() {
     return true
   })
 
-  const leakConcentrationRows = rows.filter((row) => row.point?.unit === 'ppm')
+  const leakConcentrationRows = rows.filter((row) => row.reading.unit === 'ppm')
 
   const confirm = async (row: AbnormalRow): Promise<void> => {
     const point = row.point
     if (!point) return
-    if (point.unit === 'ppm') {
+    if (row.reading.unit === 'ppm') {
       const foundTime = row.patrol
         ? row.patrol.patrolDate || row.patrol.planDate
         : new Date().toISOString().slice(0, 10)
@@ -83,12 +83,17 @@ export default function AbnormalBoard() {
         return
       }
       const station = stationStore.stations.find((item) => item.id === point.stationId)
+      // 派单依据取读数留档的标准区间，后续改点位标准不影响已派单依据
       await leakStore.createFromAbnormal({
         deviceId: point.deviceId,
         stationId: point.stationId,
+        pointId: point.id,
+        readingId: row.reading.id,
         concentrationPpm: row.reading.value,
+        standardMin: row.reading.standardMin,
+        standardMax: row.reading.standardMax,
         foundTime,
-        measure: `${point.name} 实测 ${row.reading.value} ${point.unit}，偏差率 ${row.reading.deviationPct.toFixed(2)}%，${
+        measure: `${point.name} 实测 ${row.reading.value} ${row.reading.unit}，偏差率 ${row.reading.deviationPct.toFixed(2)}%，${
           station ? station.name : ''
         } 已派发处置单`
       })
@@ -109,11 +114,15 @@ export default function AbnormalBoard() {
     for (const key of selectedKeys) {
       const row = rows.find((item) => item.reading.id === key)
       if (!row || !row.point) continue
-      if (row.point.unit === 'ppm') {
+      if (row.reading.unit === 'ppm') {
         await leakStore.createFromAbnormal({
           deviceId: row.point.deviceId,
           stationId: row.point.stationId,
+          pointId: row.point.id,
+          readingId: row.reading.id,
           concentrationPpm: row.reading.value,
+          standardMin: row.reading.standardMin,
+          standardMax: row.reading.standardMax,
           foundTime: row.patrol ? row.patrol.patrolDate || row.patrol.planDate : new Date().toISOString().slice(0, 10),
           measure: `${row.point.name} 实测 ${row.reading.value} ppm，批量派单`
         })
@@ -169,20 +178,22 @@ export default function AbnormalBoard() {
       render: (_value, record) => (
         <Space size={4}>
           <span>{record.point?.name ?? '点位已删除'}</span>
-          {record.point?.isCritical ? <Tag color="orange" size="small">关键</Tag> : null}
+          {record.reading.isCritical ? <Tag color="orange" size="small">关键</Tag> : null}
         </Space>
       )
     },
     {
-      title: '标准区间',
+      title: '标准区间（留档）',
       width: 180,
       render: (_value, record) =>
-        record.point ? `${record.point.standardMin} ~ ${record.point.standardMax} ${record.point.unit}` : '—'
+        record.reading.unit
+          ? `${record.reading.standardMin} ~ ${record.reading.standardMax} ${record.reading.unit}`
+          : '—'
     },
     {
       title: '读数',
       width: 120,
-      render: (_value, record) => `${record.reading.value} ${record.point?.unit ?? ''}`
+      render: (_value, record) => `${record.reading.value} ${record.reading.unit}`
     },
     {
       title: '偏差率',
@@ -216,7 +227,7 @@ export default function AbnormalBoard() {
       render: (_value, record) => (
         <Space size={4}>
           <Button type="text" size="small" onClick={() => confirm(record)}>
-            {record.point?.unit === 'ppm' ? '派发处置单' : '确认异常'}
+            {record.reading.unit === 'ppm' ? '派发处置单' : '确认异常'}
           </Button>
           <Button type="text" size="small" onClick={() => openFix(record)}>
             修正读数
@@ -306,7 +317,7 @@ export default function AbnormalBoard() {
         <Form form={fixForm} layout="vertical">
           <Form.Item
             field="value"
-            label={`实测读数（${fixTarget?.point?.unit ?? ''}）`}
+            label={`实测读数（${fixTarget?.reading.unit ?? ''}）`}
             rules={[{ required: true, message: '请填写读数' }]}
           >
             <InputNumber style={{ width: '100%' }} />

@@ -38,7 +38,7 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 巡检读数台账 CSV */
+/** 巡检读数台账 CSV（标准区间与判定采用读数留档，不随点位现标准变更） */
 export function exportReadingCsv(
   stations: Station[],
   devices: Device[],
@@ -50,8 +50,8 @@ export function exportReadingCsv(
     '调压站',
     '设备',
     '点位',
-    '标准下限',
-    '标准上限',
+    '标准下限(留档)',
+    '标准上限(留档)',
     '单位',
     '关键点',
     '计划日期',
@@ -74,17 +74,17 @@ export function exportReadingCsv(
         station ? station.name : '—',
         device ? `${device.type} ${device.model}` : '—',
         point ? point.name : '—',
-        point ? point.standardMin : '—',
-        point ? point.standardMax : '—',
-        point ? point.unit : '—',
-        point ? (point.isCritical ? '是' : '否') : '—',
+        reading.standardMin,
+        reading.standardMax,
+        reading.unit || '—',
+        reading.isCritical ? '是' : '否',
         patrol ? patrol.planDate : '—',
         patrol ? patrol.patrolDate || '未执行' : '—',
         patrol ? patrol.patrolman || '—' : '—',
         patrol ? patrol.state : '—',
         reading.value,
         reading.deviationPct.toFixed(2),
-        point ? abnormalLevelOf(reading.deviationPct, point.isCritical) : '—',
+        abnormalLevelOf(reading.deviationPct, reading.isCritical),
         reading.note || '—'
       ]
         .map(csvCell)
@@ -96,9 +96,9 @@ export function exportReadingCsv(
   return filename
 }
 
-/** 泄漏处置台账 CSV */
+/** 泄漏处置台账 CSV（依据标准采用派单留档） */
 export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Leak[]): string {
-  const header = ['调压站', '设备', '出厂编号', '浓度(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人']
+  const header = ['调压站', '设备', '出厂编号', '浓度(ppm)', '依据标准下限(ppm)', '依据标准上限(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人']
   const lines: string[] = [header.map(csvCell).join(',')]
   leaks.forEach((leak) => {
     const device = devices.find((item) => item.id === leak.deviceId)
@@ -110,6 +110,8 @@ export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Lea
         device ? `${device.type} ${device.model}` : '—',
         device ? device.serialNo : '—',
         leak.concentrationPpm,
+        leak.standardMin,
+        leak.standardMax,
         leak.foundTime,
         leak.measure || '—',
         leak.state,

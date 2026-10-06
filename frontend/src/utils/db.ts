@@ -11,9 +11,10 @@ import type { Patrol } from '@/types/patrol'
 import type { Reading } from '@/types/reading'
 import type { Leak } from '@/types/leak'
 import { deviationPctOf, judgeReading } from '@/utils/range'
+import { LEAK_RETEST_PASS_PPM } from '@/types/leak'
 
 export const DB_NAME = 'gbgaspress'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export const LS_KEYS = {
   dbVersion: 'gbgaspress:db-version',
@@ -44,7 +45,7 @@ export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type StationRow = Station & Revisioned
 export type DeviceRow = Device & Revisioned
@@ -147,6 +148,91 @@ class GasPressDatabase extends Dexie {
             }
           })
       })
+
+    // v3：点位补状态（停用/恢复）；读数补标准留档；泄漏单补派单依据留档与来源读数
+    this.version(DB_VERSION)
+      .stores({
+        stations: 'id, name, grade, updatedAt',
+        devices: 'id, stationId, type, state, updatedAt',
+        points: 'id, deviceId, stationId, name, isCritical, state, updatedAt',
+        patrols: 'id, stationId, planDate, state, updatedAt',
+        readings: 'id, patrolId, pointId, isAbnormal, updatedAt',
+        leaks: 'id, deviceId, stationId, state, handler, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        for (const name of ['stations', 'devices', 'points', 'patrols', 'readings', 'leaks']) {
+          await tx
+            .table(name)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              row.revision = ROW_REVISION
+            })
+        }
+
+        // 迁移：点位默认启用
+        await tx
+          .table('points')
+          .toCollection()
+          .modify((point: Record<string, unknown>) => {
+            if (point.state !== '启用' && point.state !== '停用') point.state = '启用'
+            if (typeof point.disabledAt !== 'number' || !Number.isFinite(point.disabledAt)) point.disabledAt = 0
+          })
+
+        // 迁移：读数按点位现标准回填留档（历史数据只能以现标准还原，与其原判定口径一致）
+        const points = (await tx.table('points').toArray()) as Array<{
+          id: string
+          deviceId: string
+          standardMin: number
+          standardMax: number
+          isCritical: boolean
+          unit: string
+        }>
+        const pointMap = new Map(points.map((point) => [point.id, point]))
+        await tx
+          .table('readings')
+          .toCollection()
+          .modify((reading: Record<string, unknown>) => {
+            const point = pointMap.get(String(reading.pointId))
+            if (typeof reading.standardMin !== 'number') reading.standardMin = point ? point.standardMin : 0
+            if (typeof reading.standardMax !== 'number') reading.standardMax = point ? point.standardMax : 0
+            if (typeof reading.isCritical !== 'boolean') reading.isCritical = point ? point.isCritical : false
+            if (typeof reading.unit !== 'string') reading.unit = point ? point.unit : ''
+          })
+
+        // 迁移：泄漏单补来源读数与依据留档——按设备 + 浓度匹配 ppm 读数，兜底 0~复检合格阈值
+        const readings = (await tx.table('readings').toArray()) as Array<{
+          id: string
+          pointId: string
+          value: number
+          standardMin: number
+          standardMax: number
+          unit: string
+          createdAt: number
+        }>
+        await tx
+          .table('leaks')
+          .toCollection()
+          .modify((leak: Record<string, unknown>) => {
+            if (typeof leak.pointId !== 'string') leak.pointId = ''
+            if (typeof leak.readingId !== 'string') leak.readingId = ''
+            const matched = readings
+              .filter((reading) => {
+                if (reading.unit !== 'ppm') return false
+                if (reading.value !== Number(leak.concentrationPpm)) return false
+                const point = pointMap.get(reading.pointId)
+                return point ? point.deviceId === leak.deviceId : false
+              })
+              .sort((a, b) => a.createdAt - b.createdAt)[0]
+            if (matched && (leak.pointId === '' || leak.readingId === '')) {
+              leak.pointId = matched.pointId
+              leak.readingId = matched.id
+            }
+            if (typeof leak.standardMin !== 'number') leak.standardMin = matched ? matched.standardMin : 0
+            if (typeof leak.standardMax !== 'number') {
+              leak.standardMax = matched ? matched.standardMax : LEAK_RETEST_PASS_PPM
+            }
+          })
+      })
   }
 }
 
@@ -176,17 +262,17 @@ const SEED_DEVICES: DeviceRow[] = [
 ]
 
 const SEED_POINTS: PointRow[] = [
-  { id: 'pt-1', deviceId: 'dv-1', stationId: 'st-1', name: '进口压力', standardMin: 0.35, standardMax: 0.45, unit: 'MPa', isCritical: true, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
-  { id: 'pt-2', deviceId: 'dv-1', stationId: 'st-1', name: '出口压力', standardMin: 0.18, standardMax: 0.25, unit: 'MPa', isCritical: true, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
-  { id: 'pt-3', deviceId: 'dv-1', stationId: 'st-1', name: '阀体泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: true, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
-  { id: 'pt-4', deviceId: 'dv-2', stationId: 'st-1', name: '过滤器压差', standardMin: 0, standardMax: 0.03, unit: 'MPa', isCritical: false, createdAt: stamp(-279), updatedAt: stamp(-2), revision: ROW_REVISION },
-  { id: 'pt-5', deviceId: 'dv-2', stationId: 'st-1', name: '法兰泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: false, createdAt: stamp(-279), updatedAt: stamp(-2), revision: ROW_REVISION },
-  { id: 'pt-6', deviceId: 'dv-3', stationId: 'st-1', name: '切断动作压力', standardMin: 0.25, standardMax: 0.35, unit: 'MPa', isCritical: true, createdAt: stamp(-278), updatedAt: stamp(-4), revision: ROW_REVISION },
-  { id: 'pt-7', deviceId: 'dv-4', stationId: 'st-2', name: '进口压力', standardMin: 0.15, standardMax: 0.25, unit: 'MPa', isCritical: true, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
-  { id: 'pt-8', deviceId: 'dv-4', stationId: 'st-2', name: '出口压力', standardMin: 0.08, standardMax: 0.15, unit: 'MPa', isCritical: true, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
-  { id: 'pt-9', deviceId: 'dv-4', stationId: 'st-2', name: '出口温度', standardMin: -10, standardMax: 40, unit: '℃', isCritical: false, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
-  { id: 'pt-10', deviceId: 'dv-4', stationId: 'st-2', name: '阀体泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: true, createdAt: stamp(-259), updatedAt: stamp(-1), revision: ROW_REVISION },
-  { id: 'pt-11', deviceId: 'dv-5', stationId: 'st-2', name: '放散压力', standardMin: 0.18, standardMax: 0.3, unit: 'MPa', isCritical: true, createdAt: stamp(-259), updatedAt: stamp(-1), revision: ROW_REVISION }
+  { id: 'pt-1', deviceId: 'dv-1', stationId: 'st-1', name: '进口压力', standardMin: 0.35, standardMax: 0.45, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
+  { id: 'pt-2', deviceId: 'dv-1', stationId: 'st-1', name: '出口压力', standardMin: 0.18, standardMax: 0.25, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
+  { id: 'pt-3', deviceId: 'dv-1', stationId: 'st-1', name: '阀体泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-280), updatedAt: stamp(-2), revision: ROW_REVISION },
+  { id: 'pt-4', deviceId: 'dv-2', stationId: 'st-1', name: '过滤器压差', standardMin: 0, standardMax: 0.03, unit: 'MPa', isCritical: false, state: '启用', disabledAt: 0, createdAt: stamp(-279), updatedAt: stamp(-2), revision: ROW_REVISION },
+  { id: 'pt-5', deviceId: 'dv-2', stationId: 'st-1', name: '法兰泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: false, state: '启用', disabledAt: 0, createdAt: stamp(-279), updatedAt: stamp(-2), revision: ROW_REVISION },
+  { id: 'pt-6', deviceId: 'dv-3', stationId: 'st-1', name: '切断动作压力', standardMin: 0.25, standardMax: 0.35, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-278), updatedAt: stamp(-4), revision: ROW_REVISION },
+  { id: 'pt-7', deviceId: 'dv-4', stationId: 'st-2', name: '进口压力', standardMin: 0.15, standardMax: 0.25, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
+  { id: 'pt-8', deviceId: 'dv-4', stationId: 'st-2', name: '出口压力', standardMin: 0.08, standardMax: 0.15, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
+  { id: 'pt-9', deviceId: 'dv-4', stationId: 'st-2', name: '出口温度', standardMin: -10, standardMax: 40, unit: '℃', isCritical: false, state: '启用', disabledAt: 0, createdAt: stamp(-260), updatedAt: stamp(-1), revision: ROW_REVISION },
+  { id: 'pt-10', deviceId: 'dv-4', stationId: 'st-2', name: '阀体泄漏浓度', standardMin: 0, standardMax: 50, unit: 'ppm', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-259), updatedAt: stamp(-1), revision: ROW_REVISION },
+  { id: 'pt-11', deviceId: 'dv-5', stationId: 'st-2', name: '放散压力', standardMin: 0.18, standardMax: 0.3, unit: 'MPa', isCritical: true, state: '启用', disabledAt: 0, createdAt: stamp(-259), updatedAt: stamp(-1), revision: ROW_REVISION }
 ]
 
 const SEED_PATROLS: PatrolRow[] = [
@@ -214,12 +300,12 @@ const SEED_READING_ROWS: Array<[string, string, number, string]> = [
 ]
 
 const SEED_LEAKS: LeakRow[] = [
-  { id: 'lk-1', deviceId: 'dv-1', stationId: 'st-1', concentrationPpm: 68, foundTime: '2024-06-05', measure: '更换调压器阀体密封垫并做气密试验', state: '已复检', retestValuePpm: 32, handler: '张伟', createdAt: stamp(-15), updatedAt: stamp(-10), revision: ROW_REVISION },
-  { id: 'lk-2', deviceId: 'dv-2', stationId: 'st-1', concentrationPpm: 55, foundTime: '2024-06-12', measure: '紧固法兰螺栓并涂抹检漏液复测', state: '已处置', retestValuePpm: 0, handler: '张伟', createdAt: stamp(-8), updatedAt: stamp(-6), revision: ROW_REVISION },
-  { id: 'lk-3', deviceId: 'dv-4', stationId: 'st-2', concentrationPpm: 88, foundTime: '2024-06-08', measure: '', state: '待处置', retestValuePpm: 0, handler: '', createdAt: stamp(-12), updatedAt: stamp(-12), revision: ROW_REVISION }
+  { id: 'lk-1', deviceId: 'dv-1', stationId: 'st-1', pointId: 'pt-3', readingId: 'rd-3', concentrationPpm: 68, standardMin: 0, standardMax: 50, foundTime: '2024-06-05', measure: '更换调压器阀体密封垫并做气密试验', state: '已复检', retestValuePpm: 32, handler: '张伟', createdAt: stamp(-15), updatedAt: stamp(-10), revision: ROW_REVISION },
+  { id: 'lk-2', deviceId: 'dv-2', stationId: 'st-1', pointId: 'pt-5', readingId: 'rd-7', concentrationPpm: 55, standardMin: 0, standardMax: 50, foundTime: '2024-06-12', measure: '紧固法兰螺栓并涂抹检漏液复测', state: '已处置', retestValuePpm: 0, handler: '张伟', createdAt: stamp(-8), updatedAt: stamp(-6), revision: ROW_REVISION },
+  { id: 'lk-3', deviceId: 'dv-4', stationId: 'st-2', pointId: 'pt-10', readingId: 'rd-11', concentrationPpm: 88, standardMin: 0, standardMax: 50, foundTime: '2024-06-08', measure: '', state: '待处置', retestValuePpm: 0, handler: '', createdAt: stamp(-12), updatedAt: stamp(-12), revision: ROW_REVISION }
 ]
 
-/** 由原始行派生偏差率与异常标记 */
+/** 由原始行派生偏差率、异常标记与标准留档 */
 function buildSeedReadings(): ReadingRow[] {
   return SEED_READING_ROWS.map(([patrolId, pointId, value, note], index) => {
     const point = SEED_POINTS.find((item) => item.id === pointId)
@@ -233,6 +319,10 @@ function buildSeedReadings(): ReadingRow[] {
       value,
       isAbnormal: judgement.isAbnormal,
       deviationPct: judgement.deviationPct,
+      standardMin: point ? point.standardMin : 0,
+      standardMax: point ? point.standardMax : 0,
+      isCritical: point ? point.isCritical : false,
+      unit: point ? point.unit : '',
       note,
       createdAt: stamp(-200 + index),
       updatedAt: stamp(-200 + index),
@@ -316,7 +406,11 @@ async function deleteDevicesInternal(deviceIds: string[]): Promise<void> {
 
 /* ============================ 读数写入 ============================ */
 
-/** 写入读数：自动与标准区间比对并落 isAbnormal / deviationPct */
+/**
+ * 写入读数：判定结果与标准留档一并落库。
+ * 新建读数按点位现标准留档；已存在的读数（改值/改备注）保留原留档并按留档重判，
+ * 后台改标准不会改写历史读数的判定依据。
+ */
 export async function putReading(row: {
   id: string
   patrolId: string
@@ -326,37 +420,31 @@ export async function putReading(row: {
   createdAt: number
   updatedAt: number
 }): Promise<ReadingRow> {
+  const existing = await db.readings.get(row.id)
   const point = await db.points.get(row.pointId)
-  const judgement = point
-    ? judgeReading(row.value, point.standardMin, point.standardMax, point.isCritical)
-    : { isAbnormal: false, deviationPct: 0 }
+  const snapshot = existing
+    ? {
+        standardMin: existing.standardMin,
+        standardMax: existing.standardMax,
+        isCritical: existing.isCritical,
+        unit: existing.unit
+      }
+    : {
+        standardMin: point ? point.standardMin : 0,
+        standardMax: point ? point.standardMax : 0,
+        isCritical: point ? point.isCritical : false,
+        unit: point ? point.unit : ''
+      }
+  const judgement = judgeReading(row.value, snapshot.standardMin, snapshot.standardMax, snapshot.isCritical)
   const next: ReadingRow = {
     ...row,
+    ...snapshot,
     isAbnormal: judgement.isAbnormal,
     deviationPct: judgement.deviationPct,
     revision: ROW_REVISION
   }
   await db.readings.put(next)
   return next
-}
-
-/** 重算某点位全部读数的偏差率（标准值变更后调用） */
-export async function recalculateReadingsOfPoint(pointId: string): Promise<void> {
-  const point = await db.points.get(pointId)
-  if (!point) return
-  const rows = await db.readings.where('pointId').equals(pointId).toArray()
-  if (rows.length === 0) return
-  await db.readings.bulkPut(
-    rows.map((row) => {
-      const judgement = judgeReading(row.value, point.standardMin, point.standardMax, point.isCritical)
-      return {
-        ...row,
-        isAbnormal: judgement.isAbnormal,
-        deviationPct: judgement.deviationPct,
-        updatedAt: Date.now()
-      }
-    })
-  )
 }
 
 /* ============================ 整库导入导出 ============================ */
@@ -413,12 +501,32 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.leaks.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
+    // 旧版本存档缺少 v3 字段时按现标准回填，保证留档口径一致
+    const points = (payload.points ?? []).map((point) =>
+      Object.assign({ state: '启用' as const, disabledAt: 0 }, point)
+    )
+    const pointMap = new Map(points.map((point) => [point.id, point]))
+    const readings = (payload.readings ?? []).map((reading) => {
+      const point = pointMap.get(reading.pointId)
+      return Object.assign(
+        {
+          standardMin: point ? point.standardMin : 0,
+          standardMax: point ? point.standardMax : 0,
+          isCritical: point ? point.isCritical : false,
+          unit: point ? point.unit : ''
+        },
+        reading
+      )
+    })
+    const leaks = (payload.leaks ?? []).map((leak) =>
+      Object.assign({ pointId: '', readingId: '', standardMin: 0, standardMax: LEAK_RETEST_PASS_PPM }, leak)
+    )
     await db.stations.bulkPut((payload.stations ?? []).map(rev))
     await db.devices.bulkPut((payload.devices ?? []).map(rev))
-    await db.points.bulkPut((payload.points ?? []).map(rev))
+    await db.points.bulkPut(points.map(rev))
     await db.patrols.bulkPut((payload.patrols ?? []).map(rev))
-    await db.readings.bulkPut((payload.readings ?? []).map(rev))
-    await db.leaks.bulkPut((payload.leaks ?? []).map(rev))
+    await db.readings.bulkPut(readings.map(rev))
+    await db.leaks.bulkPut(leaks.map(rev))
   })
 }
 

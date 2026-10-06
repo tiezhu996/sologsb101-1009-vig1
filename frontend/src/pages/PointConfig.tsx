@@ -1,6 +1,7 @@
 /**
  * /points 巡检点位与标准值配置
  * 维护点位上下限、单位与关键点标记，支持模板批量复制；标准值改动先进草稿再提交。
+ * 点位可停用/恢复：停用后不再进入新巡检，历史读数与泄漏依据按留档保留可查。
  * 消费 Point、Device；复用 <FilterBar>、<EmptyPanel>、<StatBadge>、<AbnormalTag>。
  */
 import { useMemo, useState } from 'react'
@@ -25,27 +26,38 @@ import EmptyPanel from '@/components/common/EmptyPanel'
 import FilterBar, { type FilterModel } from '@/components/common/FilterBar'
 import StatBadge from '@/components/common/StatBadge'
 import { useStationStore } from '@/stores/stationStore'
+import { usePatrolStore } from '@/stores/patrolStore'
+import { useLeakStore } from '@/stores/leakStore'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { db, type ReadingRow } from '@/utils/db'
 import {
   EMPTY_POINT_DRAFT,
+  POINT_STATES,
   POINT_TEMPLATES,
   POINT_UNITS,
+  pointDisableBlockers,
   type Point,
   type PointDraft,
-  type PointTemplate
+  type PointState,
+  type PointTemplate,
+  type StandardDraft
 } from '@/types/point'
 import { DEVICE_TYPES } from '@/types/device'
 import { abnormalLevelOf, deviationPctOf, rangeText } from '@/utils/range'
 
 export default function PointConfig() {
   const stationStore = useStationStore()
+  const patrolStore = usePatrolStore()
+  const leakStore = useLeakStore()
   const readingTable = useIdbTable<ReadingRow>(db.readings, { sortByUpdatedAt: false })
 
   const [pointForm] = Form.useForm<PointDraft>()
   const [templateForm] = Form.useForm<{ deviceId: string }>()
+  const [restoreForm] = Form.useForm<StandardDraft>()
   const [pointOpen, setPointOpen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
+  const [restoreTarget, setRestoreTarget] = useState<Point | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [checkedTemplates, setCheckedTemplates] = useState<string[]>(POINT_TEMPLATES.map((item) => item.name))
 
@@ -58,7 +70,8 @@ export default function PointConfig() {
         multiple: false,
         options: stationStore.stations.map((station) => ({ label: station.name, value: station.id }))
       },
-      { key: 'deviceTypes', label: '设备类型', options: DEVICE_TYPES.map((item) => ({ label: item, value: item })) }
+      { key: 'deviceTypes', label: '设备类型', options: DEVICE_TYPES.map((item) => ({ label: item, value: item })) },
+      { key: 'states', label: '点位状态', options: POINT_STATES.map((item) => ({ label: item, value: item })) }
     ],
     [stationStore.stations]
   )
@@ -66,20 +79,23 @@ export default function PointConfig() {
   const model: FilterModel = {
     keyword: filter.keyword,
     stationId: filter.stationId,
-    deviceTypes: filter.deviceTypes
+    deviceTypes: filter.deviceTypes,
+    states: filter.states
   }
 
   const onModelChange = (next: FilterModel): void => {
     stationStore.patchPointFilter({
       keyword: String(next.keyword ?? ''),
       stationId: typeof next.stationId === 'string' ? next.stationId : '',
-      deviceTypes: (Array.isArray(next.deviceTypes) ? next.deviceTypes : []) as string[]
+      deviceTypes: (Array.isArray(next.deviceTypes) ? next.deviceTypes : []) as string[],
+      states: (Array.isArray(next.states) ? next.states : []) as PointState[]
     })
   }
 
   const rows = stationStore.points.filter((point) => {
     if (filter.stationId && point.stationId !== filter.stationId) return false
     if (filter.onlyCritical && !point.isCritical) return false
+    if (filter.states.length > 0 && !filter.states.includes(point.state)) return false
     if (filter.deviceTypes.length > 0) {
       const device = stationStore.devices.find((item) => item.id === point.deviceId)
       if (!device || !filter.deviceTypes.includes(device.type)) return false
@@ -92,6 +108,9 @@ export default function PointConfig() {
 
   const abnormalCountOf = (pointId: string): number =>
     readingTable.rows.filter((row) => row.pointId === pointId && row.isAbnormal).length
+
+  const readingCountOf = (pointId: string): number =>
+    readingTable.rows.filter((row) => row.pointId === pointId).length
 
   const deviceOptions = stationStore.devices
     .filter((device) => !filter.stationId || device.stationId === filter.stationId)
@@ -133,7 +152,7 @@ export default function PointConfig() {
     }
     if (editingId) {
       await stationStore.updatePoint(editingId, payload)
-      Message.success('点位已更新，历史读数偏差率已重算')
+      Message.success('点位已更新；历史读数保持当时留档，新读数按新标准判定')
     } else {
       await stationStore.createPoint(payload)
       Message.success('点位已创建')
@@ -143,7 +162,63 @@ export default function PointConfig() {
 
   const remove = async (point: Point): Promise<void> => {
     await stationStore.removePoint(point.id)
-    Message.success('点位及其读数已删除')
+    Message.success('点位已删除')
+  }
+
+  /** 停用拦截：有点位相关草稿或待处置泄漏时先挡住 */
+  const requestDisable = (point: Point): void => {
+    const blockers = pointDisableBlockers({
+      standardDraftCount: stationStore.standardDraft[point.id] ? 1 : 0,
+      readingDraftCount: Object.keys(patrolStore.readingDraft).filter((key) => key.endsWith(`:${point.id}`)).length,
+      pendingLeakCount: leakStore.pendingCountOfPoint(point.id, point.deviceId)
+    })
+    if (blockers.length > 0) {
+      Modal.warning({
+        title: `暂不能停用「${point.name}」`,
+        content: (
+          <div>
+            <div style={{ marginBottom: 6 }}>请先处理以下事项后再停用：</div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {blockers.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ),
+        okText: '知道了'
+      })
+      return
+    }
+    Modal.confirm({
+      title: `停用点位「${point.name}」？`,
+      content: '停用后该点位不再进入新巡检；历史读数、异常记录与泄漏派单依据保留可查，恢复时需重新确认标准。',
+      okText: '确认停用',
+      okButtonProps: { status: 'warning' },
+      onOk: async () => {
+        await stationStore.disablePoint(point.id)
+        Message.success(`「${point.name}」已停用，历史数据保留可查`)
+      }
+    })
+  }
+
+  const openRestore = (point: Point): void => {
+    setRestoreTarget(point)
+    restoreForm.setFieldsValue({
+      standardMin: point.standardMin,
+      standardMax: point.standardMax,
+      isCritical: point.isCritical
+    })
+    setRestoreOpen(true)
+  }
+
+  const submitRestore = async (): Promise<void> => {
+    if (!restoreTarget) return
+    const values = await restoreForm.validate().catch(() => null)
+    if (!values) return
+    await stationStore.restorePoint(restoreTarget.id, values)
+    Message.success(`「${restoreTarget.name}」已按确认标准恢复，重新进入巡检`)
+    setRestoreOpen(false)
+    setRestoreTarget(null)
   }
 
   const commitAll = async (): Promise<void> => {
@@ -152,7 +227,7 @@ export default function PointConfig() {
       Message.warning('没有待提交的标准值草稿')
       return
     }
-    Message.success(`已提交 ${count} 个点位的标准值，历史读数已重算`)
+    Message.success(`已提交 ${count} 个点位的标准值；历史读数按当时留档判定，新读数按新标准`)
   }
 
   const openTemplate = (): void => {
@@ -179,7 +254,17 @@ export default function PointConfig() {
   }
 
   const columns: TableColumnProps<Point>[] = [
-    { title: '点位名', dataIndex: 'name', width: 140, render: (value: string) => <strong>{value}</strong> },
+    {
+      title: '点位名',
+      dataIndex: 'name',
+      width: 150,
+      render: (value: string, record) => (
+        <Space size={6}>
+          <strong>{value}</strong>
+          {record.state === '停用' ? <Tag color="gray" size="small">已停用</Tag> : null}
+        </Space>
+      )
+    },
     {
       title: '调压站 / 设备',
       width: 220,
@@ -193,6 +278,9 @@ export default function PointConfig() {
       title: '标准区间（可编辑）',
       width: 330,
       render: (_value, record) => {
+        if (record.state === '停用') {
+          return <span className="muted">{rangeText(record.standardMin, record.standardMax, record.unit)}（停用中，恢复时重新确认）</span>
+        }
         const draft = stationStore.standardDraft[record.id]
         const min = draft ? draft.standardMin : record.standardMin
         const max = draft ? draft.standardMax : record.standardMax
@@ -233,7 +321,7 @@ export default function PointConfig() {
               disabled={!draft}
               onClick={async () => {
                 await stationStore.commitStandardDraft(record.id)
-                Message.success(`${record.name} 标准值已保存，历史读数已重算`)
+                Message.success(`${record.name} 标准值已保存，新读数将按新标准判定`)
               }}
             >
               保存
@@ -246,6 +334,9 @@ export default function PointConfig() {
       title: '关键点',
       width: 110,
       render: (_value, record) => {
+        if (record.state === '停用') {
+          return record.isCritical ? <Tag color="orange" size="small">关键点</Tag> : <span className="muted">—</span>
+        }
         const draft = stationStore.standardDraft[record.id]
         const critical = draft ? draft.isCritical : record.isCritical
         return (
@@ -282,17 +373,28 @@ export default function PointConfig() {
     },
     {
       title: '操作',
-      width: 140,
+      width: 200,
       render: (_value, record) => (
         <Space size={4}>
           <Button type="text" size="small" onClick={() => openEdit(record)}>
             编辑
           </Button>
-          <Popconfirm title="删除该点位将同时删除其巡检读数" onOk={() => remove(record)}>
-            <Button type="text" size="small" status="danger">
-              删除
+          {record.state === '启用' ? (
+            <Button type="text" size="small" status="warning" onClick={() => requestDisable(record)}>
+              停用
             </Button>
-          </Popconfirm>
+          ) : (
+            <Button type="text" size="small" status="success" onClick={() => openRestore(record)}>
+              恢复
+            </Button>
+          )}
+          {readingCountOf(record.id) === 0 ? (
+            <Popconfirm title="该点位暂无读数，可安全删除" onOk={() => remove(record)}>
+              <Button type="text" size="small" status="danger">
+                删除
+              </Button>
+            </Popconfirm>
+          ) : null}
         </Space>
       )
     }
@@ -306,7 +408,7 @@ export default function PointConfig() {
         <div>
           <h2 className="page-head__title">巡检点位与标准值配置</h2>
           <p className="page-head__desc">
-            维护点位上下限、单位与关键点标记；关键点偏差率超过 5% 即判严重超标，普通点为 10%。
+            维护点位上下限、单位与关键点标记；关键点偏差率超过 5% 即判严重超标，普通点为 10%。停用后不再进入新巡检，历史数据保留可查。
           </p>
         </div>
         <div className="page-head__actions">
@@ -323,6 +425,7 @@ export default function PointConfig() {
       <div className="stat-row">
         <StatBadge label="点位总数" value={stats.total} suffix="个" tone="primary" />
         <StatBadge label="关键点" value={stats.critical} suffix="个" tone="warning" />
+        <StatBadge label="已停用" value={stats.disabled} suffix="个" tone="default" hint="停用点位不再进入新巡检，历史读数保留可查" />
         <StatBadge label="设备数" value={stationStore.devices.length} suffix="台" tone="info" />
         <StatBadge
           label="异常读数占比"
@@ -352,7 +455,7 @@ export default function PointConfig() {
           <h3 className="panel-title" style={{ margin: 0 }}>
             点位清单（{rows.length} / {stats.total}）
           </h3>
-          <span className="muted">标准值改动先进入草稿，保存后自动重算历史读数偏差率</span>
+          <span className="muted">标准值改动先进入草稿；历史读数按保存时的留档判定，不受后续改动影响</span>
         </div>
         {rows.length === 0 ? (
           <EmptyPanel
@@ -372,7 +475,7 @@ export default function PointConfig() {
             data={rows}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1600 }}
           />
         )}
       </div>
@@ -405,6 +508,39 @@ export default function PointConfig() {
           <Form.Item field="isCritical" label="是否关键点" triggerPropName="checked">
             <Switch />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        visible={restoreOpen}
+        title={restoreTarget ? `恢复点位 · ${restoreTarget.name}` : '恢复点位'}
+        onCancel={() => {
+          setRestoreOpen(false)
+          setRestoreTarget(null)
+        }}
+        onOk={submitRestore}
+        okText="确认标准并恢复"
+        cancelText="取消"
+        unmountOnExit
+      >
+        <div className="muted" style={{ marginBottom: 12 }}>
+          恢复前请重新确认标准值；确认后点位重新进入巡检，新读数按确认后的标准留档判定，历史读数留档不变。
+        </div>
+        <Form form={restoreForm} layout="vertical">
+          <Form.Item field="standardMin" label="标准下限" rules={[{ required: true, message: '请填写标准下限' }]}>
+            <InputNumber step={0.01} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item field="standardMax" label="标准上限" rules={[{ required: true, message: '请填写标准上限' }]}>
+            <InputNumber step={0.01} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item field="isCritical" label="是否关键点" triggerPropName="checked">
+            <Switch />
+          </Form.Item>
+          {restoreTarget ? (
+            <div className="muted">
+              单位 {restoreTarget.unit}；停用前标准 {rangeText(restoreTarget.standardMin, restoreTarget.standardMax, restoreTarget.unit)}
+            </div>
+          ) : null}
         </Form>
       </Modal>
 

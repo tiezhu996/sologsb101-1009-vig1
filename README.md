@@ -70,17 +70,19 @@ sologsb101-1009/
 | 路由 | 页面 | 消费模型 | 主要交互 |
 | --- | --- | --- | --- |
 | `/stations` | 调压站与设备台账 | Station、Device | 新建/编辑/删除站点与设备；按压力等级与设备类型筛选；卡片回显设备数、待处置泄漏数与漏检次数 |
-| `/points` | 巡检点位与标准值配置 | Point、Device | 维护点位上下限/单位/关键点标记（草稿 → 逐条/批量提交并重算历史读数）；按模板批量复制标准值 |
-| `/patrols` | 巡检录入 | Patrol、Reading、Point | 选定任务后逐点录入读数，实时偏差率与异常级别；逐点或整批保存；完成巡检、标记漏检、现场备注 |
-| `/abnormal` | 异常判定与分级 | Reading、Point | 按关键点权重降序排列；勾选批量确认；浓度类点位一键派发泄漏处置单 |
-| `/leaks` | 泄漏处置单与复检闭环 | Leak、Device、Reading | 派单 → 填写处置措施与处置人 → 录入复检浓度判合格闭环；导出处置台账 CSV |
+| `/points` | 巡检点位与标准值配置 | Point、Device | 维护点位上下限/单位/关键点标记（草稿 → 逐条/批量提交）；按模板批量复制标准值；点位停用/恢复（停用不进新巡检、历史保留可查，恢复需重新确认标准） |
+| `/patrols` | 巡检录入 | Patrol、Reading、Point | 选定任务后逐点录入读数，实时偏差率与异常级别；逐点或整批保存；完成巡检、标记漏检、现场备注；停用点位不再出现 |
+| `/abnormal` | 异常判定与分级 | Reading、Point | 按读数留档的关键点权重降序排列；勾选批量确认；浓度类点位一键派发泄漏处置单（依据取读数留档） |
+| `/leaks` | 泄漏处置单与复检闭环 | Leak、Device、Reading | 派单 → 填写处置措施与处置人 → 录入复检浓度判合格闭环；依据标准按派单留档展示；导出处置台账 CSV |
 | `/plans` | 巡检计划与漏检提醒 | Patrol、Station | 按站点批量生成计划；超期未检自动提醒并按超期天数排序；导出读数台账 CSV 与结构版本 |
 
 ## 五、数据存储说明
 
 - **IndexedDB 库名**：`gbgaspress`（Dexie 封装，`src/utils/db.ts`）
 - **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的索引变更与 `upgrade()` 迁移（补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`）
+- **数据结构版本**：`DB_VERSION = 3`，含 `version(1)` → `version(2)` → `version(3)` 的索引变更与 `upgrade()` 迁移
+  - v2：补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`
+  - v3：点位补 `state` / `disabledAt`（默认启用）；读数补标准留档 `standardMin` / `standardMax` / `isCritical` / `unit`（按点位现标准回填）；泄漏单补 `pointId` / `readingId` 与依据留档 `standardMin` / `standardMax`（按设备 + 浓度匹配来源读数，兜底 0~50 ppm）
 - **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座调压站 → 5 台设备 → 11 个点位 → 6 次巡检 → 11 条读数 → 3 张泄漏处置单的完整父子孙链条；播种幂等
 - **localStorage 辅助键**：`gbgaspress:db-version`、`gbgaspress:last-backup-at`、`gbgaspress:ui-prefs`
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷
@@ -102,3 +104,10 @@ npm run preview    # 本地预览构建产物
 - 排序权重：严重超标（关键点 50 / 普通点 30）> 轻微超标（关键点 30 / 普通点 20）> 正常（0）
 - 泄漏复检合格阈值：`≤ 50 ppm`
 - 漏检判定：计划日期早于今天且实际日期为空
+
+## 八、读数留档与点位生命周期
+
+- **读数留档**：每次保存读数时，把当时的标准上下限、关键点标记与单位一并落库；判定、偏差率按留档计算。修正读数/补备注时保留原留档
+- **以留档为准**：异常清单、泄漏派单依据与读数/泄漏台账 CSV 一律采用留档口径；后台修改点位标准不会改写历史异常与已派单依据，只影响新读数
+- **停用**：点位停用后不再进入新巡检，历史读数、异常记录与泄漏依据保留可查；有未提交标准草稿、未保存读数草稿或关联待处置泄漏单时先挡住停用；已有读数的点位只能停用不能删除
+- **恢复**：恢复时需重新确认标准（可调整上下限与关键点标记），确认后点位重新进入巡检，新读数按确认后的标准留档

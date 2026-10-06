@@ -7,6 +7,14 @@ export interface Reading {
   isAbnormal: boolean
   /** 偏差率（%），区间内为 0 */
   deviationPct: number
+  /**
+   * 保存读数时的标准留档：当时的上下限、关键点标记与单位。
+   * 异常清单、泄漏派单依据与导出一律以留档为准，不随点位现标准变更。
+   */
+  standardMin: number
+  standardMax: number
+  isCritical: boolean
+  unit: string
   note: string
   createdAt: number
   updatedAt: number

@@ -21,16 +21,22 @@ interface LeakState_ {
   ready: boolean
   patchFilter: (patch: { stateFilter?: LeakState[]; stationId?: string; onlyOpen?: boolean }) => void
   resetFilter: () => void
-  createLeak: (draft: LeakDraft) => Promise<Leak>
+  createLeak: (draft: LeakDraft, basis?: LeakBasis) => Promise<Leak>
   updateLeak: (id: string, patch: Partial<LeakDraft>) => Promise<void>
   removeLeak: (id: string) => Promise<void>
   advance: (id: string, params?: { handler?: string; measure?: string }) => Promise<LeakState | null>
   submitRetest: (id: string, retestValuePpm: number, handler: string) => Promise<boolean>
   hasLeakOfDevice: (deviceId: string) => boolean
+  /** 关联（按点位或所属设备）的待处置泄漏单数，用于点位停用拦截 */
+  pendingCountOfPoint: (pointId: string, deviceId: string) => number
   createFromAbnormal: (payload: {
     deviceId: string
     stationId: string
+    pointId: string
+    readingId: string
     concentrationPpm: number
+    standardMin: number
+    standardMax: number
     foundTime: string
     measure: string
   }) => Promise<Leak>
@@ -38,6 +44,14 @@ interface LeakState_ {
   closedPercent: () => number
   retestPassCount: () => number
   filteredLeaks: () => Leak[]
+}
+
+/** 派单依据留档：来源点位/读数与当时的标准区间 */
+export interface LeakBasis {
+  pointId: string
+  readingId: string
+  standardMin: number
+  standardMax: number
 }
 
 export const useLeakStore = create<LeakState_>((set, get) => ({
@@ -59,14 +73,24 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
     set({ stateFilter: [], stationId: '', onlyOpen: false })
   },
 
-  async createLeak(draft) {
+  async createLeak(draft, basis) {
     const device = await db.devices.get(draft.deviceId)
+    // 手工单未指定依据时，取设备当前启用的 ppm 点位标准兜底，再无则按复检合格阈值
+    const fallbackPoint = basis
+      ? undefined
+      : (await db.points.where('deviceId').equals(draft.deviceId).toArray()).find(
+          (point) => point.unit === 'ppm' && point.state === '启用'
+        )
     const now = Date.now()
     const row: LeakRow = {
       id: createId('lk'),
       deviceId: draft.deviceId,
       stationId: device ? device.stationId : '',
+      pointId: basis ? basis.pointId : fallbackPoint ? fallbackPoint.id : '',
+      readingId: basis ? basis.readingId : '',
       concentrationPpm: Number(draft.concentrationPpm) || 0,
+      standardMin: basis ? basis.standardMin : fallbackPoint ? fallbackPoint.standardMin : 0,
+      standardMax: basis ? basis.standardMax : fallbackPoint ? fallbackPoint.standardMax : LEAK_RETEST_PASS_PPM,
       foundTime: draft.foundTime,
       measure: draft.measure.trim(),
       state: draft.state,
@@ -117,16 +141,31 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
     return get().leaks.some((leak) => leak.deviceId === deviceId)
   },
 
+  pendingCountOfPoint(pointId, deviceId) {
+    return get().leaks.filter(
+      (leak) =>
+        leak.state === '待处置' && (leak.pointId === pointId || (leak.pointId === '' && leak.deviceId === deviceId))
+    ).length
+  },
+
   async createFromAbnormal(payload) {
-    return get().createLeak({
-      deviceId: payload.deviceId,
-      concentrationPpm: payload.concentrationPpm,
-      foundTime: payload.foundTime,
-      measure: payload.measure,
-      state: '待处置',
-      retestValuePpm: 0,
-      handler: ''
-    })
+    return get().createLeak(
+      {
+        deviceId: payload.deviceId,
+        concentrationPpm: payload.concentrationPpm,
+        foundTime: payload.foundTime,
+        measure: payload.measure,
+        state: '待处置',
+        retestValuePpm: 0,
+        handler: ''
+      },
+      {
+        pointId: payload.pointId,
+        readingId: payload.readingId,
+        standardMin: payload.standardMin,
+        standardMax: payload.standardMax
+      }
+    )
   },
 
   counts() {

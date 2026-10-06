@@ -190,9 +190,16 @@ export default function LeakBoard() {
         <Space size={6}>
           <span style={{ color: '#f53f3f', fontWeight: 600 }}>{formatLeakConcentration(record.concentrationPpm)}</span>
           <Tag color="red" size="small">
-            偏差 {deviationPctOf(record.concentrationPpm, 0, 50).toFixed(0)}%
+            偏差 {deviationPctOf(record.concentrationPpm, record.standardMin, record.standardMax).toFixed(0)}%
           </Tag>
         </Space>
+      )
+    },
+    {
+      title: '派单依据（留档）',
+      width: 150,
+      render: (_value, record) => (
+        <span className="muted">标准 {record.standardMin} ~ {record.standardMax} ppm</span>
       )
     },
     { title: '发现时间', dataIndex: 'foundTime', width: 120 },
@@ -300,7 +307,7 @@ export default function LeakBoard() {
             data={rows}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1650 }}
           />
         )}
       </div>

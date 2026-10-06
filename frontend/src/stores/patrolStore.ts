@@ -179,7 +179,21 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
       const value = draft[key]
       if (value === undefined || !Number.isFinite(value)) return
       const found = existing.find((reading) => reading.pointId === point.id)
-      const judgement = judgeReading(value, point.standardMin, point.standardMax, point.isCritical)
+      // 已存在的读数保留原留档；新读数按点位现标准留档
+      const snapshot = found
+        ? {
+            standardMin: found.standardMin,
+            standardMax: found.standardMax,
+            isCritical: found.isCritical,
+            unit: found.unit
+          }
+        : {
+            standardMin: point.standardMin,
+            standardMax: point.standardMax,
+            isCritical: point.isCritical,
+            unit: point.unit
+          }
+      const judgement = judgeReading(value, snapshot.standardMin, snapshot.standardMax, snapshot.isCritical)
       payload.push({
         id: found ? found.id : createId('rd'),
         patrolId,
@@ -187,6 +201,7 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
         value,
         isAbnormal: judgement.isAbnormal,
         deviationPct: judgement.deviationPct,
+        ...snapshot,
         note: found ? found.note : '',
         createdAt: found ? found.createdAt : now,
         updatedAt: now
@@ -229,15 +244,14 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
       .map((reading) => {
         const point = points.find((item) => item.id === reading.pointId) ?? null
         const patrol = get().patrols.find((item) => item.id === reading.patrolId) ?? null
-        const level: AbnormalLevel = point
-          ? abnormalLevelOf(reading.deviationPct, point.isCritical)
-          : '轻微超标'
+        // 分级一律采用读数留档的关键点标记，不随点位现标准变更
+        const level: AbnormalLevel = abnormalLevelOf(reading.deviationPct, reading.isCritical)
         return {
           reading,
           patrol,
           point,
           level,
-          weight: point ? abnormalWeight(level, point.isCritical) : 20
+          weight: abnormalWeight(level, reading.isCritical)
         }
       })
       .sort((a, b) => b.weight - a.weight || b.reading.deviationPct - a.reading.deviationPct)

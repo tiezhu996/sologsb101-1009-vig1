@@ -12,7 +12,6 @@ import {
   deletePointCascade,
   deleteStationCascade,
   readUiPrefs,
-  recalculateReadingsOfPoint,
   writeUiPrefs,
   type DeviceRow,
   type PointRow,
@@ -57,6 +56,10 @@ interface StationState {
   createPoint: (draft: PointDraft) => Promise<Point>
   updatePoint: (id: string, patch: Partial<PointDraft>) => Promise<void>
   removePoint: (id: string) => Promise<void>
+  /** 停用点位：不再进入新巡检，历史读数与泄漏依据保留可查 */
+  disablePoint: (id: string) => Promise<void>
+  /** 恢复点位：重新确认标准后重新进入巡检 */
+  restorePoint: (id: string, standard: StandardDraft) => Promise<void>
   applyTemplate: (deviceId: string, templates: PointTemplate[]) => Promise<number>
   setStandardDraft: (pointId: string, draft: StandardDraft) => void
   clearStandardDraft: (pointId?: string) => void
@@ -66,7 +69,7 @@ interface StationState {
   pointsOfDevice: (deviceId: string) => Point[]
   currentStation: () => Station | null
   filteredStations: () => Station[]
-  pointStats: () => { total: number; critical: number }
+  pointStats: () => { total: number; critical: number; disabled: number }
 }
 
 export const useStationStore = create<StationState>((set, get) => ({
@@ -173,6 +176,8 @@ export const useStationStore = create<StationState>((set, get) => ({
       standardMax: Number(draft.standardMax) || 0,
       unit: draft.unit,
       isCritical: draft.isCritical,
+      state: '启用',
+      disabledAt: 0,
       createdAt: now,
       updatedAt: now
     }
@@ -188,11 +193,29 @@ export const useStationStore = create<StationState>((set, get) => ({
       if (device) next.stationId = device.stationId
     }
     await db.points.update(id, next)
-    await recalculateReadingsOfPoint(id)
   },
 
   async removePoint(id) {
     await deletePointCascade(id)
+    get().clearStandardDraft(id)
+  },
+
+  async disablePoint(id) {
+    await db.points.update(id, { state: '停用', disabledAt: Date.now(), updatedAt: Date.now() })
+    get().clearStandardDraft(id)
+  },
+
+  async restorePoint(id, standard) {
+    const min = Math.min(standard.standardMin, standard.standardMax)
+    const max = Math.max(standard.standardMin, standard.standardMax)
+    await db.points.update(id, {
+      standardMin: min,
+      standardMax: max > min ? max : min + 0.001,
+      isCritical: standard.isCritical,
+      state: '启用',
+      disabledAt: 0,
+      updatedAt: Date.now()
+    })
     get().clearStandardDraft(id)
   },
 
@@ -212,6 +235,8 @@ export const useStationStore = create<StationState>((set, get) => ({
         standardMax: template.standardMax,
         unit: template.unit,
         isCritical: template.isCritical,
+        state: '启用' as const,
+        disabledAt: 0,
         createdAt: now,
         updatedAt: now
       }))
@@ -245,7 +270,6 @@ export const useStationStore = create<StationState>((set, get) => ({
       updatedAt: Date.now()
     })
     get().clearStandardDraft(pointId)
-    await recalculateReadingsOfPoint(pointId)
   },
 
   async commitAllStandardDrafts() {
@@ -267,9 +291,6 @@ export const useStationStore = create<StationState>((set, get) => ({
       })
     if (rows.length > 0) await db.points.bulkPut(rows)
     get().clearStandardDraft()
-    for (const row of rows) {
-      await recalculateReadingsOfPoint(row.id)
-    }
     return rows.length
   },
 
@@ -303,7 +324,11 @@ export const useStationStore = create<StationState>((set, get) => ({
 
   pointStats() {
     const points = get().points
-    return { total: points.length, critical: points.filter((point) => point.isCritical).length }
+    return {
+      total: points.length,
+      critical: points.filter((point) => point.isCritical).length,
+      disabled: points.filter((point) => point.state === '停用').length
+    }
   }
 }))
 
