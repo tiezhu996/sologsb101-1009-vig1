@@ -1,3 +1,13 @@
+/**
+ * 点位状态机：
+ * - 启用：正常进入新巡检
+ * - 停用：不再进入新巡检，历史读数与泄漏依据保留可查
+ * - 待确认：停用后申请恢复，须重新确认标准值才能再次进入巡检
+ */
+export type PointState = '启用' | '停用' | '待确认'
+
+export const POINT_STATES: PointState[] = ['启用', '停用', '待确认']
+
 /** 点位：设备上的巡检点位与标准值区间 */
 export interface Point {
   id: string
@@ -11,6 +21,8 @@ export interface Point {
   unit: string
   /** 是否关键点：关键点偏差超过 5% 即判严重超标 */
   isCritical: boolean
+  /** 启用 / 停用 / 待确认（恢复时需重新确认标准） */
+  state: PointState
   createdAt: number
   updatedAt: number
 }

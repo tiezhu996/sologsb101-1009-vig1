@@ -27,6 +27,7 @@ import { usePatrolGap } from '@/hooks/usePatrolGap'
 import { PATROL_STATES, type Patrol, type PatrolState } from '@/types/patrol'
 import type { Point } from '@/types/point'
 import type { Reading } from '@/types/reading'
+import { abnormalLevelOf } from '@/utils/range'
 
 export default function PatrolEntry() {
   const stationStore = useStationStore()
@@ -68,13 +69,22 @@ export default function PatrolEntry() {
     ? patrolStore.patrols.find((patrol) => patrol.id === patrolStore.activePatrolId) ?? null
     : null
 
-  /** 当前站点下所有设备点位 */
+  /** 当前站点下启用中的设备点位（停用 / 待确认点位不进新巡检） */
   const activePoints = useMemo<Point[]>(() => {
     if (!activePatrol) return []
     const deviceIds = stationStore.devices
       .filter((device) => device.stationId === activePatrol.stationId)
       .map((device) => device.id)
-    return stationStore.points.filter((point) => deviceIds.includes(point.deviceId))
+    return stationStore.points.filter((point) => deviceIds.includes(point.deviceId) && point.state === '启用')
+  }, [activePatrol, stationStore.devices, stationStore.points])
+
+  /** 该站点全部点位（含停用），用于提示停用数量 */
+  const stationPointsCount = useMemo<number>(() => {
+    if (!activePatrol) return 0
+    const deviceIds = stationStore.devices
+      .filter((device) => device.stationId === activePatrol.stationId)
+      .map((device) => device.id)
+    return stationStore.points.filter((point) => deviceIds.includes(point.deviceId)).length
   }, [activePatrol, stationStore.devices, stationStore.points])
 
   const activeReadings = activePatrol ? patrolStore.readingsOfPatrol(activePatrol.id) : []
@@ -134,14 +144,19 @@ export default function PatrolEntry() {
   const submitNote = async (): Promise<void> => {
     const values = await noteForm.validate().catch(() => null)
     if (!values || !noteTarget) return
-    await patrolStore.saveSingleReading(
-      noteTarget.patrolId,
-      stationStore.points.find((point) => point.id === noteTarget.pointId) as Point,
-      noteTarget.value,
-      values.note
-    )
+    // 只追加备注，不按现标准重算历史判定
+    await patrolStore.annotateReading(noteTarget.id, values.note)
     Message.success('现场备注已保存')
     setNoteOpen(false)
+  }
+
+  /** 已保存读数的标准区间与判定一律取读数留档，缺失留档时回退点位现标准 */
+  const basisTextOf = (record: Reading): string => {
+    const point = stationStore.points.find((item) => item.id === record.pointId)
+    const min = typeof record.snapshotMin === 'number' ? record.snapshotMin : point?.standardMin
+    const max = typeof record.snapshotMax === 'number' ? record.snapshotMax : point?.standardMax
+    if (min === undefined || max === undefined) return '—'
+    return `${min} ~ ${max} ${point?.unit ?? ''}`
   }
 
   const readingColumns: TableColumnProps<Reading>[] = [
@@ -151,12 +166,9 @@ export default function PatrolEntry() {
       render: (_value, record) => stationStore.points.find((point) => point.id === record.pointId)?.name ?? '点位已删除'
     },
     {
-      title: '标准区间',
-      width: 180,
-      render: (_value, record) => {
-        const point = stationStore.points.find((item) => item.id === record.pointId)
-        return point ? `${point.standardMin} ~ ${point.standardMax} ${point.unit}` : '—'
-      }
+      title: '判定时标准（留档）',
+      width: 190,
+      render: (_value, record) => basisTextOf(record)
     },
     { title: '读数', dataIndex: 'value', width: 120, render: (value: number) => value },
     { title: '偏差率', dataIndex: 'deviationPct', width: 110, render: (value: number) => `${value.toFixed(2)}%` },
@@ -165,8 +177,9 @@ export default function PatrolEntry() {
       width: 160,
       render: (_value, record) => {
         const point = stationStore.points.find((item) => item.id === record.pointId)
-        if (!point) return <Tag>—</Tag>
-        return <AbnormalTag level={patrolStore.judge(point, record.value).level} size="small" />
+        const critical = typeof record.snapshotCritical === 'boolean' ? record.snapshotCritical : point?.isCritical ?? false
+        if (point === undefined && typeof record.snapshotCritical !== 'boolean') return <Tag>—</Tag>
+        return <AbnormalTag level={abnormalLevelOf(record.deviationPct, critical)} size="small" />
       }
     },
     { title: '备注', dataIndex: 'note', width: 200, render: (value: string) => value || '—' },
@@ -297,17 +310,24 @@ export default function PatrolEntry() {
               <div className="panel-head">
                 <h3 className="panel-title" style={{ margin: 0 }}>
                   逐点录入 · {stationStore.stations.find((item) => item.id === activePatrol.stationId)?.name ?? ''}
-                  <span className="muted"> （{activePatrol.planDate}，{activePoints.length} 个点位）</span>
+                  <span className="muted"> （{activePatrol.planDate}，{activePoints.length} 个启用点位）</span>
                 </h3>
                 <span className="muted">
                   草稿中异常 {abnormalInDraft} 项 / 已保存异常 {activeReadings.filter((item) => item.isAbnormal).length} 项
+                  {stationPointsCount - activePoints.length > 0
+                    ? `；另有 ${stationPointsCount - activePoints.length} 个停用/待确认点位不参与本次巡检`
+                    : ''}
                 </span>
               </div>
 
               {activePoints.length === 0 ? (
                 <EmptyPanel
-                  title="该站点暂无点位"
-                  description="先到点位配置页为设备配置标准值区间。"
+                  title="该站点暂无可巡检的启用点位"
+                  description={
+                    stationPointsCount > 0
+                      ? '该站点点位均已停用或待确认；恢复时须到点位配置页重新确认标准后启用。'
+                      : '先到点位配置页为设备配置标准值区间。'
+                  }
                   compact
                 />
               ) : (

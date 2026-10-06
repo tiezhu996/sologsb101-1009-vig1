@@ -90,12 +90,18 @@ export default function AbnormalBoard() {
         foundTime,
         measure: `${point.name} 实测 ${row.reading.value} ${point.unit}，偏差率 ${row.reading.deviationPct.toFixed(2)}%，${
           station ? station.name : ''
-        } 已派发处置单`
+        } 已派发处置单`,
+        // 派单依据采用读数留档：后台改标准不会改掉已派单依据
+        sourceReadingId: row.reading.id,
+        sourcePointName: point.name,
+        basisMin: row.reading.snapshotMin,
+        basisMax: row.reading.snapshotMax,
+        basisDeviationPct: row.reading.deviationPct
       })
-      Message.success('已派发泄漏处置单')
+      Message.success('已派发泄漏处置单（依据已按读数留档）')
       return
     }
-    await patrolStore.saveSingleReading(row.reading.patrolId, point, row.reading.value, '异常已确认并记录')
+    await patrolStore.annotateReading(row.reading.id, '异常已确认并记录')
     Message.success('异常已确认并记录')
   }
 
@@ -115,11 +121,16 @@ export default function AbnormalBoard() {
           stationId: row.point.stationId,
           concentrationPpm: row.reading.value,
           foundTime: row.patrol ? row.patrol.patrolDate || row.patrol.planDate : new Date().toISOString().slice(0, 10),
-          measure: `${row.point.name} 实测 ${row.reading.value} ppm，批量派单`
+          measure: `${row.point.name} 实测 ${row.reading.value} ppm，批量派单`,
+          sourceReadingId: row.reading.id,
+          sourcePointName: row.point.name,
+          basisMin: row.reading.snapshotMin,
+          basisMax: row.reading.snapshotMax,
+          basisDeviationPct: row.reading.deviationPct
         })
         leakCount += 1
       } else {
-        await patrolStore.saveSingleReading(row.reading.patrolId, row.point, row.reading.value, '异常已批量确认')
+        await patrolStore.annotateReading(row.reading.id, '异常已批量确认')
         notedCount += 1
       }
     }
@@ -169,15 +180,25 @@ export default function AbnormalBoard() {
       render: (_value, record) => (
         <Space size={4}>
           <span>{record.point?.name ?? '点位已删除'}</span>
-          {record.point?.isCritical ? <Tag color="orange" size="small">关键</Tag> : null}
+          {(() => {
+            const critical =
+              typeof record.reading.snapshotCritical === 'boolean'
+                ? record.reading.snapshotCritical
+                : record.point?.isCritical
+            return critical ? <Tag color="orange" size="small">关键</Tag> : null
+          })()}
         </Space>
       )
     },
     {
-      title: '标准区间',
-      width: 180,
-      render: (_value, record) =>
-        record.point ? `${record.point.standardMin} ~ ${record.point.standardMax} ${record.point.unit}` : '—'
+      title: '判定时标准（留档）',
+      width: 190,
+      render: (_value, record) => {
+        if (!record.point) return '—'
+        const min = typeof record.reading.snapshotMin === 'number' ? record.reading.snapshotMin : record.point.standardMin
+        const max = typeof record.reading.snapshotMax === 'number' ? record.reading.snapshotMax : record.point.standardMax
+        return `${min} ~ ${max} ${record.point.unit}`
+      }
     },
     {
       title: '读数',
@@ -240,7 +261,7 @@ export default function AbnormalBoard() {
         <div>
           <h2 className="page-head__title">异常判定与分级</h2>
           <p className="page-head__desc">
-            关键点偏差率 &gt; {CRITICAL_DEVIATION_PCT}%、普通点 &gt; {SEVERE_DEVIATION_PCT}% 判严重超标；按权重降序排列。
+            关键点偏差率 &gt; {CRITICAL_DEVIATION_PCT}%、普通点 &gt; {SEVERE_DEVIATION_PCT}% 判严重超标；按权重降序排列。分级与标准区间均采用读数保存时的留档，点位改标准不影响历史异常。
           </p>
         </div>
         <div className="page-head__actions">
@@ -267,7 +288,7 @@ export default function AbnormalBoard() {
           <h3 className="panel-title" style={{ margin: 0 }}>
             异常清单（{rows.length}）
           </h3>
-          <span className="muted">勾选后可批量确认；浓度类点位会直接派发泄漏处置单</span>
+          <span className="muted">勾选后可批量确认；浓度类点位会直接派发泄漏处置单，派单依据按读数留档锁定</span>
         </div>
         {rows.length === 0 ? (
           <EmptyPanel

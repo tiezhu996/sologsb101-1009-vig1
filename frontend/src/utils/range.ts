@@ -96,6 +96,34 @@ export function judgeReading(value: number, min: number, max: number, isCritical
   }
 }
 
+/** 读数留档：保存读数时的点位标准快照结构 */
+export interface ReadingBasis {
+  snapshotMin: number
+  snapshotMax: number
+  snapshotCritical: boolean
+}
+
+/**
+ * 按读数留档（保存时的上下限与关键点标记）重新判定，
+ * 保证点位现标准被后台修改后，历史异常清单与派单依据不被改写。
+ * 对缺失留档的旧读数回退到调用方提供的现标准。
+ */
+export function judgeReadingByBasis(
+  value: number,
+  basis: ReadingBasis | undefined,
+  fallback: { standardMin: number; standardMax: number; isCritical: boolean }
+): ReadingJudgement {
+  if (
+    basis &&
+    Number.isFinite(basis.snapshotMin) &&
+    Number.isFinite(basis.snapshotMax) &&
+    typeof basis.snapshotCritical === 'boolean'
+  ) {
+    return judgeReading(value, basis.snapshotMin, basis.snapshotMax, basis.snapshotCritical)
+  }
+  return judgeReading(value, fallback.standardMin, fallback.standardMax, fallback.isCritical)
+}
+
 export function rangeText(min: number, max: number, unit: string): string {
   return `${min} ~ ${max} ${unit}`
 }

@@ -44,6 +44,10 @@ interface PatrolState_ {
   seedDraftFromReadings: (patrolId: string, points: Point[]) => void
   saveReadingDrafts: (patrolId: string, points: Point[]) => Promise<number>
   saveSingleReading: (patrolId: string, point: Point, value: number, note: string) => Promise<void>
+  /** 仅追加现场备注/确认记录，不重算读数判定（历史异常按留档锁定） */
+  annotateReading: (readingId: string, note: string) => Promise<void>
+  /** 是否存在某点位未保存的录入草稿（停用拦截用） */
+  hasDraftOfPoint: (patrolId: string, pointId: string) => boolean
   removeReading: (id: string) => Promise<void>
   judge: (point: Point, value: number) => ReadingJudgement
   readingsOfPatrol: (patrolId: string) => Reading[]
@@ -188,6 +192,10 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
         isAbnormal: judgement.isAbnormal,
         deviationPct: judgement.deviationPct,
         note: found ? found.note : '',
+        // 每次保存都留档当时的上下限与关键点标记
+        snapshotMin: point.standardMin,
+        snapshotMax: point.standardMax,
+        snapshotCritical: point.isCritical,
         createdAt: found ? found.createdAt : now,
         updatedAt: now
       })
@@ -210,6 +218,16 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
     })
   },
 
+  async annotateReading(readingId, note) {
+    const found = get().readings.find((reading) => reading.id === readingId)
+    if (!found) return
+    await db.readings.update(readingId, { note: note.trim(), updatedAt: Date.now() })
+  },
+
+  hasDraftOfPoint(patrolId, pointId) {
+    return get().readingDraft[`${patrolId}:${pointId}`] !== undefined
+  },
+
   async removeReading(id) {
     await db.readings.delete(id)
   },
@@ -229,15 +247,17 @@ export const usePatrolStore = create<PatrolState_>((set, get) => ({
       .map((reading) => {
         const point = points.find((item) => item.id === reading.pointId) ?? null
         const patrol = get().patrols.find((item) => item.id === reading.patrolId) ?? null
-        const level: AbnormalLevel = point
-          ? abnormalLevelOf(reading.deviationPct, point.isCritical)
+        // 分级按读数留档的关键点标记，后台改现标准不会改写旧异常级别
+        const isCritical = typeof reading.snapshotCritical === 'boolean' ? reading.snapshotCritical : point?.isCritical ?? false
+        const level: AbnormalLevel = point || typeof reading.snapshotCritical === 'boolean'
+          ? abnormalLevelOf(reading.deviationPct, isCritical)
           : '轻微超标'
         return {
           reading,
           patrol,
           point,
           level,
-          weight: point ? abnormalWeight(level, point.isCritical) : 20
+          weight: point || typeof reading.snapshotCritical === 'boolean' ? abnormalWeight(level, isCritical) : 20
         }
       })
       .sort((a, b) => b.weight - a.weight || b.reading.deviationPct - a.reading.deviationPct)

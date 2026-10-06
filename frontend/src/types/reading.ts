@@ -8,6 +8,12 @@ export interface Reading {
   /** 偏差率（%），区间内为 0 */
   deviationPct: number
   note: string
+  /** 保存读数时点位的标准下限（留档，后台改标准不影响历史判定） */
+  snapshotMin: number
+  /** 保存读数时点位的标准上限（留档） */
+  snapshotMax: number
+  /** 保存读数时点位是否为关键点（留档，决定分级阈值 5%/10%） */
+  snapshotCritical: boolean
   createdAt: number
   updatedAt: number
 }

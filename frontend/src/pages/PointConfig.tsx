@@ -25,6 +25,8 @@ import EmptyPanel from '@/components/common/EmptyPanel'
 import FilterBar, { type FilterModel } from '@/components/common/FilterBar'
 import StatBadge from '@/components/common/StatBadge'
 import { useStationStore } from '@/stores/stationStore'
+import { usePatrolStore } from '@/stores/patrolStore'
+import { useLeakStore } from '@/stores/leakStore'
 import { useIdbTable } from '@/hooks/useIdbTable'
 import { db, type ReadingRow } from '@/utils/db'
 import {
@@ -33,13 +35,22 @@ import {
   POINT_UNITS,
   type Point,
   type PointDraft,
+  type PointState,
   type PointTemplate
 } from '@/types/point'
 import { DEVICE_TYPES } from '@/types/device'
 import { abnormalLevelOf, deviationPctOf, rangeText } from '@/utils/range'
 
+const POINT_STATE_COLOR: Record<PointState, 'green' | 'gray' | 'orange'> = {
+  启用: 'green',
+  停用: 'gray',
+  待确认: 'orange'
+}
+
 export default function PointConfig() {
   const stationStore = useStationStore()
+  const patrolStore = usePatrolStore()
+  const leakStore = useLeakStore()
   const readingTable = useIdbTable<ReadingRow>(db.readings, { sortByUpdatedAt: false })
 
   const [pointForm] = Form.useForm<PointDraft>()
@@ -90,9 +101,6 @@ export default function PointConfig() {
     return point.name.toLowerCase().includes(text) || (device ? device.model.toLowerCase().includes(text) : false)
   })
 
-  const abnormalCountOf = (pointId: string): number =>
-    readingTable.rows.filter((row) => row.pointId === pointId && row.isAbnormal).length
-
   const deviceOptions = stationStore.devices
     .filter((device) => !filter.stationId || device.stationId === filter.stationId)
     .map((device) => {
@@ -133,7 +141,7 @@ export default function PointConfig() {
     }
     if (editingId) {
       await stationStore.updatePoint(editingId, payload)
-      Message.success('点位已更新，历史读数偏差率已重算')
+      Message.success('点位已更新；新标准只影响此后保存的读数，历史读数按留档保留')
     } else {
       await stationStore.createPoint(payload)
       Message.success('点位已创建')
@@ -142,8 +150,57 @@ export default function PointConfig() {
   }
 
   const remove = async (point: Point): Promise<void> => {
-    await stationStore.removePoint(point.id)
-    Message.success('点位及其读数已删除')
+    const historyCount = readingTable.rows.filter((row) => row.pointId === point.id).length
+    if (historyCount > 0) {
+      Message.error(`该点位有 ${historyCount} 条历史读数，不能删除；请改用「停用」，停用后历史仍可查询`)
+      return
+    }
+    try {
+      await stationStore.removePoint(point.id)
+      Message.success('点位已删除（无历史读数）')
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '点位删除失败')
+    }
+  }
+
+  /** 停用前置校验：未提交标准草稿、未保存录入草稿、待处置泄漏任一存在即挡住 */
+  const deactivateBlockers = (point: Point): string[] => {
+    const blockers: string[] = []
+    if (stationStore.standardDraft[point.id]) blockers.push('存在未提交的标准值草稿')
+    const hasPendingDraft = Object.keys(patrolStore.readingDraft).some((key) => {
+      const sep = key.indexOf(':')
+      if (key.slice(sep + 1) !== point.id) return false
+      const patrolId = key.slice(0, sep)
+      const draftValue = patrolStore.readingDraft[key]
+      const saved = patrolStore.readingsOfPatrol(patrolId).find((reading) => reading.pointId === point.id)
+      // 无对应已保存读数，或草稿值与已存档读数不一致，才算未保存草稿
+      return !saved || saved.value !== draftValue
+    })
+    if (hasPendingDraft) blockers.push('巡检录入页存在该点位未保存的读数草稿')
+    if (point.unit === 'ppm' && leakStore.hasOpenLeakOfDevice(point.deviceId)) {
+      blockers.push('所属设备存在待处置/处置中泄漏单，闭环后再停用')
+    }
+    return blockers
+  }
+
+  const deactivate = async (point: Point): Promise<void> => {
+    const blockers = deactivateBlockers(point)
+    if (blockers.length > 0) {
+      Message.warning(`无法停用：${blockers.join('；')}`)
+      return
+    }
+    await stationStore.deactivatePoint(point.id)
+    Message.success(`点位「${point.name}」已停用，不再进入新巡检，历史读数与泄漏依据保留可查`)
+  }
+
+  const requestReactivate = async (point: Point): Promise<void> => {
+    await stationStore.requestReactivatePoint(point.id)
+    Message.info('已提交恢复申请，请核对并确认现行标准区间后重新启用')
+  }
+
+  const confirmReactivate = async (point: Point): Promise<void> => {
+    await stationStore.confirmReactivatePoint(point.id)
+    Message.success(`已按现行标准 ${rangeText(point.standardMin, point.standardMax, point.unit)} 重新启用，恢复进入巡检`)
   }
 
   const commitAll = async (): Promise<void> => {
@@ -152,7 +209,7 @@ export default function PointConfig() {
       Message.warning('没有待提交的标准值草稿')
       return
     }
-    Message.success(`已提交 ${count} 个点位的标准值，历史读数已重算`)
+    Message.success(`已提交 ${count} 个点位的标准值；新标准只影响此后新读数，历史读数按留档保留`)
   }
 
   const openTemplate = (): void => {
@@ -197,6 +254,7 @@ export default function PointConfig() {
         const min = draft ? draft.standardMin : record.standardMin
         const max = draft ? draft.standardMax : record.standardMax
         const critical = draft ? draft.isCritical : record.isCritical
+        const readOnly = record.state !== '启用'
         return (
           <Space size={4}>
             <InputNumber
@@ -204,6 +262,7 @@ export default function PointConfig() {
               style={{ width: 92 }}
               value={min}
               step={0.01}
+              disabled={readOnly}
               onChange={(value: number | undefined) =>
                 stationStore.setStandardDraft(record.id, {
                   standardMin: Number(value ?? 0),
@@ -218,6 +277,7 @@ export default function PointConfig() {
               style={{ width: 92 }}
               value={max}
               step={0.01}
+              disabled={readOnly}
               onChange={(value: number | undefined) =>
                 stationStore.setStandardDraft(record.id, {
                   standardMin: min,
@@ -233,7 +293,7 @@ export default function PointConfig() {
               disabled={!draft}
               onClick={async () => {
                 await stationStore.commitStandardDraft(record.id)
-                Message.success(`${record.name} 标准值已保存，历史读数已重算`)
+                Message.success(`${record.name} 标准值已保存（只影响此后新读数，历史读数按留档保留）`)
               }}
             >
               保存
@@ -252,6 +312,7 @@ export default function PointConfig() {
           <Switch
             size="small"
             checked={critical}
+            disabled={record.state !== '启用'}
             onChange={(checked: boolean) =>
               stationStore.setStandardDraft(record.id, {
                 standardMin: draft ? draft.standardMin : record.standardMin,
@@ -264,6 +325,11 @@ export default function PointConfig() {
       }
     },
     {
+      title: '状态',
+      width: 100,
+      render: (_value, record) => <Tag color={POINT_STATE_COLOR[record.state]}>{record.state}</Tag>
+    },
+    {
       title: '标准区间',
       width: 160,
       render: (_value, record) => rangeText(record.standardMin, record.standardMax, record.unit)
@@ -272,23 +338,54 @@ export default function PointConfig() {
       title: '异常读数',
       width: 170,
       render: (_value, record) => {
-        const count = abnormalCountOf(record.id)
-        if (count === 0) return <Tag color="green">无异常</Tag>
-        const worst = readingTable.rows
-          .filter((row) => row.pointId === record.id && row.isAbnormal)
-          .reduce((max, row) => Math.max(max, row.deviationPct), 0)
-        return <AbnormalTag level={abnormalLevelOf(worst, record.isCritical)} deviationPct={worst} size="small" />
+        const abnormal = readingTable.rows.filter((row) => row.pointId === record.id && row.isAbnormal)
+        if (abnormal.length === 0) return <Tag color="green">无异常</Tag>
+        // 级别按每条读数自己留档的关键点标记，不跟随点位现标准
+        const worst = abnormal.reduce((max, row) => {
+          const level = abnormalLevelOf(row.deviationPct, row.snapshotCritical)
+          const rank = level === '严重超标' ? 2 : 1
+          return rank > max.rank ? { rank, deviationPct: row.deviationPct, critical: row.snapshotCritical } : max
+        }, { rank: 0, deviationPct: 0, critical: false })
+        return <AbnormalTag level={abnormalLevelOf(worst.deviationPct, worst.critical)} deviationPct={worst.deviationPct} size="small" />
       }
     },
     {
       title: '操作',
-      width: 140,
+      width: 230,
       render: (_value, record) => (
         <Space size={4}>
           <Button type="text" size="small" onClick={() => openEdit(record)}>
             编辑
           </Button>
-          <Popconfirm title="删除该点位将同时删除其巡检读数" onOk={() => remove(record)}>
+          {record.state === '启用' ? (
+            <Popconfirm
+              title="停用后该点位不再进入新巡检，历史读数仍保留可查。确认停用？"
+              onOk={() => deactivate(record)}
+            >
+              <Button type="text" size="small">
+                停用
+              </Button>
+            </Popconfirm>
+          ) : record.state === '停用' ? (
+            <Button type="text" size="small" onClick={() => requestReactivate(record)}>
+              申请恢复
+            </Button>
+          ) : (
+            <Popconfirm
+              title={`恢复前请确认现行标准：${rangeText(record.standardMin, record.standardMax, record.unit)}${
+                record.isCritical ? '（关键点）' : ''
+              }。确认按此标准重新启用？`}
+              onOk={() => confirmReactivate(record)}
+            >
+              <Button type="text" size="small" status="warning">
+                确认标准并启用
+              </Button>
+            </Popconfirm>
+          )}
+          <Popconfirm
+            title="仅从未产生过读数的点位可删除；有历史读数请改用停用。"
+            onOk={() => remove(record)}
+          >
             <Button type="text" size="small" status="danger">
               删除
             </Button>
@@ -299,6 +396,8 @@ export default function PointConfig() {
   ]
 
   const stats = stationStore.pointStats()
+  const activeCount = stationStore.points.filter((point) => point.state === '启用').length
+  const disabledCount = stationStore.points.filter((point) => point.state !== '启用').length
 
   return (
     <div>
@@ -306,7 +405,7 @@ export default function PointConfig() {
         <div>
           <h2 className="page-head__title">巡检点位与标准值配置</h2>
           <p className="page-head__desc">
-            维护点位上下限、单位与关键点标记；关键点偏差率超过 5% 即判严重超标，普通点为 10%。
+            维护点位上下限、单位与关键点标记；关键点偏差率超过 5% 即判严重超标，普通点为 10%。停用点位不再进入新巡检，历史读数与派单依据仍可查；恢复时须重新确认标准。
           </p>
         </div>
         <div className="page-head__actions">
@@ -322,8 +421,8 @@ export default function PointConfig() {
 
       <div className="stat-row">
         <StatBadge label="点位总数" value={stats.total} suffix="个" tone="primary" />
-        <StatBadge label="关键点" value={stats.critical} suffix="个" tone="warning" />
-        <StatBadge label="设备数" value={stationStore.devices.length} suffix="台" tone="info" />
+        <StatBadge label="启用中" value={activeCount} suffix="个" tone="success" />
+        <StatBadge label="停用 / 待确认" value={disabledCount} suffix="个" tone="default" />
         <StatBadge
           label="异常读数占比"
           value={readingTable.rows.filter((row) => row.isAbnormal).length}
@@ -352,7 +451,7 @@ export default function PointConfig() {
           <h3 className="panel-title" style={{ margin: 0 }}>
             点位清单（{rows.length} / {stats.total}）
           </h3>
-          <span className="muted">标准值改动先进入草稿，保存后自动重算历史读数偏差率</span>
+          <span className="muted">标准值改动先进入草稿；保存只影响此后新读数，历史异常与已派单依据按读数留档锁定。有待处置泄漏或录入草稿时无法停用</span>
         </div>
         {rows.length === 0 ? (
           <EmptyPanel
@@ -372,7 +471,7 @@ export default function PointConfig() {
             data={rows}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1700 }}
           />
         )}
       </div>

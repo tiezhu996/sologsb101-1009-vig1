@@ -27,12 +27,19 @@ interface LeakState_ {
   advance: (id: string, params?: { handler?: string; measure?: string }) => Promise<LeakState | null>
   submitRetest: (id: string, retestValuePpm: number, handler: string) => Promise<boolean>
   hasLeakOfDevice: (deviceId: string) => boolean
+  /** 设备是否存在未闭环（待处置/已处置）泄漏单，停用点位拦截用 */
+  hasOpenLeakOfDevice: (deviceId: string) => boolean
   createFromAbnormal: (payload: {
     deviceId: string
     stationId: string
     concentrationPpm: number
     foundTime: string
     measure: string
+    sourceReadingId?: string
+    sourcePointName?: string
+    basisMin?: number
+    basisMax?: number
+    basisDeviationPct?: number
   }) => Promise<Leak>
   counts: () => Record<LeakState, number>
   closedPercent: () => number
@@ -72,6 +79,12 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
       state: draft.state,
       retestValuePpm: Number(draft.retestValuePpm) || 0,
       handler: draft.handler.trim(),
+      // 派单依据随单留档；手工新建无来源读数时记空来源
+      sourceReadingId: draft.sourceReadingId ?? '',
+      sourcePointName: draft.sourcePointName ?? '',
+      basisMin: Number(draft.basisMin) || 0,
+      basisMax: Number(draft.basisMax) || 50,
+      basisDeviationPct: Number(draft.basisDeviationPct) || 0,
       createdAt: now,
       updatedAt: now
     }
@@ -117,6 +130,10 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
     return get().leaks.some((leak) => leak.deviceId === deviceId)
   },
 
+  hasOpenLeakOfDevice(deviceId) {
+    return get().leaks.some((leak) => leak.deviceId === deviceId && leak.state !== '已复检')
+  },
+
   async createFromAbnormal(payload) {
     return get().createLeak({
       deviceId: payload.deviceId,
@@ -125,7 +142,12 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
       measure: payload.measure,
       state: '待处置',
       retestValuePpm: 0,
-      handler: ''
+      handler: '',
+      sourceReadingId: payload.sourceReadingId ?? '',
+      sourcePointName: payload.sourcePointName ?? '',
+      basisMin: payload.basisMin ?? 0,
+      basisMax: payload.basisMax ?? 50,
+      basisDeviationPct: payload.basisDeviationPct ?? 0
     })
   },
 

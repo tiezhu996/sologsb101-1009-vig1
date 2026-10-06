@@ -184,14 +184,21 @@ export default function LeakBoard() {
       }
     },
     {
-      title: '泄漏浓度',
-      width: 200,
+      title: '泄漏浓度 / 派单依据',
+      width: 260,
       render: (_value, record) => (
-        <Space size={6}>
-          <span style={{ color: '#f53f3f', fontWeight: 600 }}>{formatLeakConcentration(record.concentrationPpm)}</span>
-          <Tag color="red" size="small">
-            偏差 {deviationPctOf(record.concentrationPpm, 0, 50).toFixed(0)}%
-          </Tag>
+        <Space size={6} direction="vertical" style={{ gap: 2 }}>
+          <Space size={6}>
+            <span style={{ color: '#f53f3f', fontWeight: 600 }}>{formatLeakConcentration(record.concentrationPpm)}</span>
+            <Tag color="red" size="small">
+              偏差 {Number(record.basisDeviationPct || deviationPctOf(record.concentrationPpm, 0, record.basisMax || 50)).toFixed(0)}%
+            </Tag>
+          </Space>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {record.sourcePointName
+              ? `依据「${record.sourcePointName}」留档标准 ${record.basisMin} ~ ${record.basisMax} ppm`
+              : '手工建单，无读数留档依据（参考 0 ~ 50 ppm）'}
+          </span>
         </Space>
       )
     },
@@ -249,7 +256,7 @@ export default function LeakBoard() {
         <div>
           <h2 className="page-head__title">泄漏处置单与复检闭环</h2>
           <p className="page-head__desc">
-            待处置 → 已处置（填写措施与处置人）→ 已复检（复检浓度 ≤ {LEAK_RETEST_PASS_PPM} ppm 判合格）。
+            待处置 → 已处置（填写措施与处置人）→ 已复检（复检浓度 ≤ {LEAK_RETEST_PASS_PPM} ppm 判合格）。派单时的偏差率与标准区间随单留档，点位标准后续调整不会改写已派单依据。
           </p>
         </div>
         <div className="page-head__actions">
@@ -300,7 +307,7 @@ export default function LeakBoard() {
             data={rows}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1650 }}
           />
         )}
       </div>

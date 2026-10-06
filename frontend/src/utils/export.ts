@@ -38,7 +38,7 @@ export function csvCell(value: string | number): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-/** 巡检读数台账 CSV */
+/** 巡检读数台账 CSV：标准区间与判定一律采用读数保存时的留档 */
 export function exportReadingCsv(
   stations: Station[],
   devices: Device[],
@@ -50,10 +50,11 @@ export function exportReadingCsv(
     '调压站',
     '设备',
     '点位',
-    '标准下限',
-    '标准上限',
+    '判定时标准下限(留档)',
+    '判定时标准上限(留档)',
     '单位',
-    '关键点',
+    '关键点(留档)',
+    '点位状态',
     '计划日期',
     '实际日期',
     '巡检人',
@@ -69,22 +70,27 @@ export function exportReadingCsv(
     const patrol = patrols.find((item) => item.id === reading.patrolId)
     const device = point ? devices.find((item) => item.id === point.deviceId) : undefined
     const station = patrol ? stations.find((item) => item.id === patrol.stationId) : undefined
+    // 留档优先，极旧数据缺留档时回退点位现标准
+    const min = typeof reading.snapshotMin === 'number' ? reading.snapshotMin : point?.standardMin
+    const max = typeof reading.snapshotMax === 'number' ? reading.snapshotMax : point?.standardMax
+    const critical = typeof reading.snapshotCritical === 'boolean' ? reading.snapshotCritical : point?.isCritical
     lines.push(
       [
         station ? station.name : '—',
         device ? `${device.type} ${device.model}` : '—',
-        point ? point.name : '—',
-        point ? point.standardMin : '—',
-        point ? point.standardMax : '—',
+        point ? point.name : '点位已删除',
+        min ?? '—',
+        max ?? '—',
         point ? point.unit : '—',
-        point ? (point.isCritical ? '是' : '否') : '—',
+        critical === undefined ? '—' : critical ? '是' : '否',
+        point ? point.state : '—',
         patrol ? patrol.planDate : '—',
         patrol ? patrol.patrolDate || '未执行' : '—',
         patrol ? patrol.patrolman || '—' : '—',
         patrol ? patrol.state : '—',
         reading.value,
         reading.deviationPct.toFixed(2),
-        point ? abnormalLevelOf(reading.deviationPct, point.isCritical) : '—',
+        critical === undefined ? '—' : abnormalLevelOf(reading.deviationPct, critical),
         reading.note || '—'
       ]
         .map(csvCell)
@@ -96,9 +102,24 @@ export function exportReadingCsv(
   return filename
 }
 
-/** 泄漏处置台账 CSV */
+/** 泄漏处置台账 CSV：偏差率与标准区间采用处置单派单时的留档依据 */
 export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Leak[]): string {
-  const header = ['调压站', '设备', '出厂编号', '浓度(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人']
+  const header = [
+    '调压站',
+    '设备',
+    '出厂编号',
+    '浓度(ppm)',
+    '依据点位(留档)',
+    '依据下限(留档)',
+    '依据上限(留档)',
+    '依据偏差率(%)',
+    '发现时间',
+    '处置措施',
+    '状态',
+    '复检值(ppm)',
+    '复检结论',
+    '处置人'
+  ]
   const lines: string[] = [header.map(csvCell).join(',')]
   leaks.forEach((leak) => {
     const device = devices.find((item) => item.id === leak.deviceId)
@@ -110,6 +131,10 @@ export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Lea
         device ? `${device.type} ${device.model}` : '—',
         device ? device.serialNo : '—',
         leak.concentrationPpm,
+        leak.sourcePointName || '手工建单',
+        leak.sourcePointName ? leak.basisMin : '—',
+        leak.sourcePointName ? leak.basisMax : '—',
+        leak.sourcePointName ? Number(leak.basisDeviationPct || 0).toFixed(2) : '—',
         leak.foundTime,
         leak.measure || '—',
         leak.state,
@@ -128,7 +153,7 @@ export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Lea
 
 /** 点位标准值配置 CSV */
 export function exportPointCsv(stations: Station[], devices: Device[], points: Point[]): string {
-  const header = ['调压站', '设备类型', '设备型号', '点位名', '标准下限', '标准上限', '单位', '关键点', '区间宽度']
+  const header = ['调压站', '设备类型', '设备型号', '点位名', '标准下限', '标准上限', '单位', '关键点', '状态', '区间宽度']
   const lines: string[] = [header.map(csvCell).join(',')]
   points.forEach((point) => {
     const device = devices.find((item) => item.id === point.deviceId)
@@ -143,6 +168,7 @@ export function exportPointCsv(stations: Station[], devices: Device[], points: P
         point.standardMax,
         point.unit,
         point.isCritical ? '是' : '否',
+        point.state,
         (point.standardMax - point.standardMin).toFixed(4)
       ]
         .map(csvCell)

@@ -12,14 +12,13 @@ import {
   deletePointCascade,
   deleteStationCascade,
   readUiPrefs,
-  recalculateReadingsOfPoint,
   writeUiPrefs,
   type DeviceRow,
   type PointRow,
   type StationRow
 } from '@/utils/db'
 import type { Device, DeviceDraft, DeviceState, DeviceType } from '@/types/device'
-import type { Point, PointDraft, PointFilterState, PointTemplate, StandardDraft } from '@/types/point'
+import type { Point, PointDraft, PointFilterState, PointState, PointTemplate, StandardDraft } from '@/types/point'
 import { createEmptyPointFilter } from '@/types/point'
 import type { Station, StationDraft, StationGrade } from '@/types/station'
 
@@ -57,6 +56,12 @@ interface StationState {
   createPoint: (draft: PointDraft) => Promise<Point>
   updatePoint: (id: string, patch: Partial<PointDraft>) => Promise<void>
   removePoint: (id: string) => Promise<void>
+  /** 停用点位：调用方需先确认无标准草稿、无录入草稿、无待处置泄漏 */
+  deactivatePoint: (id: string) => Promise<void>
+  /** 申请恢复：停用 → 待确认，须重新确认标准后才能再次进入巡检 */
+  requestReactivatePoint: (id: string) => Promise<void>
+  /** 恢复确认：待确认 → 启用 */
+  confirmReactivatePoint: (id: string) => Promise<void>
   applyTemplate: (deviceId: string, templates: PointTemplate[]) => Promise<number>
   setStandardDraft: (pointId: string, draft: StandardDraft) => void
   clearStandardDraft: (pointId?: string) => void
@@ -173,6 +178,7 @@ export const useStationStore = create<StationState>((set, get) => ({
       standardMax: Number(draft.standardMax) || 0,
       unit: draft.unit,
       isCritical: draft.isCritical,
+      state: '启用',
       createdAt: now,
       updatedAt: now
     }
@@ -187,13 +193,26 @@ export const useStationStore = create<StationState>((set, get) => ({
       const device = await db.devices.get(patch.deviceId)
       if (device) next.stationId = device.stationId
     }
+    // 只改点位现标准：历史读数自带留档，不再随现标准重算
     await db.points.update(id, next)
-    await recalculateReadingsOfPoint(id)
   },
 
   async removePoint(id) {
     await deletePointCascade(id)
     get().clearStandardDraft(id)
+  },
+
+  async deactivatePoint(id) {
+    await db.points.update(id, { state: '停用' as PointState, updatedAt: Date.now() })
+    get().clearStandardDraft(id)
+  },
+
+  async requestReactivatePoint(id) {
+    await db.points.update(id, { state: '待确认' as PointState, updatedAt: Date.now() })
+  },
+
+  async confirmReactivatePoint(id) {
+    await db.points.update(id, { state: '启用' as PointState, updatedAt: Date.now() })
   },
 
   async applyTemplate(deviceId, templates) {
@@ -212,6 +231,7 @@ export const useStationStore = create<StationState>((set, get) => ({
         standardMax: template.standardMax,
         unit: template.unit,
         isCritical: template.isCritical,
+        state: '启用' as PointState,
         createdAt: now,
         updatedAt: now
       }))
@@ -245,7 +265,7 @@ export const useStationStore = create<StationState>((set, get) => ({
       updatedAt: Date.now()
     })
     get().clearStandardDraft(pointId)
-    await recalculateReadingsOfPoint(pointId)
+    // 历史读数按各自留档判定，不随新标准重算
   },
 
   async commitAllStandardDrafts() {
@@ -267,9 +287,6 @@ export const useStationStore = create<StationState>((set, get) => ({
       })
     if (rows.length > 0) await db.points.bulkPut(rows)
     get().clearStandardDraft()
-    for (const row of rows) {
-      await recalculateReadingsOfPoint(row.id)
-    }
     return rows.length
   },
 
